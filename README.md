@@ -1,6 +1,8 @@
 # WLED Mapper
 
 This project lets you capture LED positions from a camera, adjust the layout, and export both the LED map and a 2D gap mask.
+![showcase](https://github.com/user-attachments/assets/01fee45c-910b-40fe-9166-78a9f6adf9c2)
+(randomly dropped lights on floor)
 
 ## Prerequisites
 - Python 3.10+
