@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>WLED Mapping Viewer</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #0f1115; color: #f1f1f1; }
+    #layout { display: flex; flex-direction: column; min-height: 100vh; }
+    #controls { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: #151821; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    .control-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    button, .field { background: #1f2430; color: #f1f1f1; border: 1px solid #2d3240; padding: 6px 12px; cursor: pointer; font-size: 0.9rem; }
+    button:hover { background: #2b3242; }
+    .field { display: flex; align-items: center; gap: 8px; cursor: default; }
+    .field input[type=number] { width: 90px; background: #0f1115; border: 1px solid #2d3240; color: #f1f1f1; padding: 4px 6px; }
+    #panels { display: flex; flex: 1; gap: 16px; padding: 16px; box-sizing: border-box; }
+    .panel { flex: 1; background: #11141d; border: 1px solid #1f2430; padding: 12px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; }
+    .panel-head { display: flex; align-items: center; gap: 12px; }
+    .panel h2 { margin: 0; font-size: 1rem; color: #dbe3ff; }
+    .canvas-wrap { flex: 1; position: relative; background: #08090d; border: 1px solid #232938; display: flex; justify-content: center; align-items: center; }
+    canvas { width: 100%; height: 100%; }
+    #status { font-size: 0.9rem; color: #b5bcc9; }
+    #summary { font-size: 0.9rem; color: #ced6f3; }
+    @media (max-width: 1100px) { #panels { flex-direction: column; } }
+  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta charset="utf-8" />
+  <meta name="referrer" content="same-origin" />
+  <meta name="color-scheme" content="dark" />
+</head>
+<body>
+  <div id="layout">
+    <div id="controls">
+      <div class="control-row">
+        <label class="field">Host <input id="hostInput" type="text" placeholder="http://wled.local" style="width:200px"></label>
+        <label class="field">LEDs <input id="countInput" type="number" min="1" step="1" value="150"></label>
+        <label class="field">Camera <input id="cameraInput" type="number" min="0" step="1" value="0"></label>
+        <label class="field">Segment <input id="segmentInput" type="number" min="0" step="1" value="0"></label>
+        <label class="field">Frames/LED <input id="framesInput" type="number" min="1" step="1" value="5"></label>
+        <label class="field">Transition (ms) <input id="transitionInput" type="number" min="0" max="65000" step="50" value="0"></label>
+        <label class="field">Min Bright <input id="minBrightInput" type="number" min="1" step="1" value="30"></label>
+        <label class="field">Prelight (s) <input id="prelightInput" type="number" min="0" step="0.05" value="0.3"></label>
+        <label class="field">Capture (s) <input id="captureInput" type="number" min="0" step="0.05" value="0.6"></label>
+        <label class="field">Postlight (s) <input id="postlightInput" type="number" min="0" step="0.05" value="0.2"></label>
+        <button id="startBtn">Start Mapping</button>
+        <button id="reloadBtn">Reload CSV</button>
+        <span id="status"></span>
+      </div>
+      <div class="control-row">
+        <label class="field">Step <input id="stepInput" type="number" min="0.05" step="0.05" value="10"></label>
+        <label class="field">Width <input id="widthInput" type="number" min="1" step="1" placeholder="auto"></label>
+        <label class="field">Height <input id="heightInput" type="number" min="1" step="1" placeholder="auto"></label>
+        <button id="applyBtn">Apply</button>
+        <button id="generateBtn">Generate ledmap.json</button>
+        <button id="generateGapsBtn">Download 2D gaps</button>
+      </div>
+      <div class="control-row">
+        <span id="summary"></span>
+      </div>
+    </div>
+    <div id="panels">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Camera Space</h2>
+          <label class="field"><input id="wireToggle" type="checkbox"> Wire LEDs (in order)</label>
+        </div>
+        <div class="canvas-wrap"><canvas id="sourceCanvas" width="640" height="640"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Grid Preview</h2>
+        <div class="canvas-wrap"><canvas id="gridCanvas" width="640" height="640"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const csvCandidates = ["/data/mapping.csv", "data/mapping.csv", "../data/mapping.csv", "./data/mapping.csv"];    
+    const pointRadius = 6;
+
+    const sourceCanvas = document.getElementById('sourceCanvas');
+    const gridCanvas = document.getElementById('gridCanvas');
+    const sourceCtx = sourceCanvas.getContext('2d');
+    const gridCtx = gridCanvas.getContext('2d');
+
+    const wireToggle = document.getElementById('wireToggle');
+    const statusEl = document.getElementById('status');
+    const summaryEl = document.getElementById('summary');
+    const hostInput = document.getElementById('hostInput');
+    const countInput = document.getElementById('countInput');
+    const cameraInput = document.getElementById('cameraInput');
+    const framesInput = document.getElementById('framesInput');
+    const segmentInput = document.getElementById('segmentInput');
+    const prelightInput = document.getElementById('prelightInput');
+    const captureInput = document.getElementById('captureInput');
+    const postlightInput = document.getElementById('postlightInput');
+    const transitionInput = document.getElementById('transitionInput');
+    const minBrightInput = document.getElementById('minBrightInput');
+    const stepInput = document.getElementById('stepInput');
+    const widthInput = document.getElementById('widthInput');
+    const heightInput = document.getElementById('heightInput');
+
+    let sourcePoints = [];
+    let currentGrid = null;
+
+    function formatLedMapText(map, width, height) {
+      const lines = ['{"map":', '  ['];
+      for (let row = 0; row < height; row += 1) {
+        const start = row * width;
+        const rowValues = map.slice(start, start + width);
+        const formatted = rowValues.map(value => value.toString().padStart(2, ' ')).join(', ');
+        const suffix = row < height - 1 ? ',' : '';
+        lines.push('    ' + formatted + suffix);
+      }
+      lines.push('  ],');
+      lines.push('  "width":  ' + width + ',');
+      lines.push('  "height": ' + height);
+      lines.push('}');
+      return lines.join('\n') + '\n';
+    }
+
+    async function fetchFirst(urls) {
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          if (res.ok) return await res.text();
+        } catch (_) { /* ignore */ }
+      }
+      throw new Error('mapping.csv not found');
+    }
+
+    function parseCsv(text) {
+      const rows = text.trim().split(/\r?\n/);
+      if (!rows.length) return [];
+      const headers = rows.shift().split(',').map(h => h.trim().toLowerCase());
+      return rows.filter(Boolean).map(row => {
+        const parts = row.split(',');
+        const rec = {};
+        headers.forEach((k, i) => { rec[k] = Number(parts[i]); });
+        return rec;
+      });
+    }
+
+    function scaleSourcePoints(data) {
+      if (!data.length) return [];
+      const minX = Math.min(...data.map(d => d.x));
+      const maxX = Math.max(...data.map(d => d.x));
+      const minY = Math.min(...data.map(d => d.y));
+      const maxY = Math.max(...data.map(d => d.y));
+      const padding = 40;
+      const spanX = Math.max(maxX - minX, 1);
+      const spanY = Math.max(maxY - minY, 1);
+      const scale = Math.min((sourceCanvas.width - padding * 2) / spanX, (sourceCanvas.height - padding * 2) / spanY);
+      const offsetX = padding + (sourceCanvas.width - padding * 2 - spanX * scale) / 2;
+      const offsetY = padding + (sourceCanvas.height - padding * 2 - spanY * scale) / 2;
+      return data.map(item => ({
+        led: item.led, brightness: item.brightness,
+        x: offsetX + (item.x - minX) * scale,
+        y: offsetY + (item.y - minY) * scale,
+      }));
+    }
+
+    function renderSource(points) {
+      sourceCtx.fillStyle = '#08090d';
+      sourceCtx.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+      sourceCtx.strokeStyle = '#1f2430';
+      sourceCtx.strokeRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+
+      if (!points.length) {
+        sourceCtx.fillStyle = '#888';
+        sourceCtx.font = '14px Arial';
+        sourceCtx.textAlign = 'center';
+        sourceCtx.textBaseline = 'middle';
+        sourceCtx.fillText('No CSV data loaded', sourceCanvas.width / 2, sourceCanvas.height / 2);
+        return;
+      }
+
+      sourceCtx.font = '11px Arial';
+      sourceCtx.textAlign = 'center';
+      sourceCtx.textBaseline = 'middle';
+      points.forEach(p => {
+        sourceCtx.beginPath();
+        sourceCtx.fillStyle = '#3b82f6';
+        sourceCtx.arc(p.x, p.y, pointRadius, 0, Math.PI * 2);
+        sourceCtx.fill();
+        sourceCtx.fillStyle = '#f1f1f1';
+        sourceCtx.fillText(String(p.led), p.x, p.y);
+      });
+
+      if (wireToggle && wireToggle.checked && points.length > 1) {
+        const ordered = points.slice().sort((a, b) => a.led - b.led);
+        sourceCtx.save();
+        sourceCtx.strokeStyle = '#ef4444';
+        sourceCtx.lineWidth = 2;
+        sourceCtx.beginPath();
+        sourceCtx.moveTo(ordered[0].x, ordered[0].y);
+        for (let i = 1; i < ordered.length; i += 1) {
+          sourceCtx.lineTo(ordered[i].x, ordered[i].y);
+        }
+        sourceCtx.stroke();
+        sourceCtx.restore();
+      }
+    }
+
+    function renderGrid(grid) {
+      gridCtx.fillStyle = '#08090d';
+      gridCtx.fillRect(0, 0, gridCanvas.width, gridCanvas.height);
+      gridCtx.strokeStyle = '#1f2430';
+      gridCtx.strokeRect(0, 0, gridCanvas.width, gridCanvas.height);
+      if (!grid) {
+        gridCtx.fillStyle = '#888';
+        gridCtx.font = '14px Arial';
+        gridCtx.textAlign = 'center';
+        gridCtx.textBaseline = 'middle';
+        gridCtx.fillText('No grid produced', gridCanvas.width / 2, gridCanvas.height / 2);
+        return;
+      }
+      const padding = 40;
+      const cellSize = Math.min((gridCanvas.width - padding * 2) / grid.width, (gridCanvas.height - padding * 2) / grid.height);
+      const startX = (gridCanvas.width - cellSize * grid.width) / 2;
+      const startY = (gridCanvas.height - cellSize * grid.height) / 2;
+      gridCtx.font = '11px Arial';
+      gridCtx.textAlign = 'center';
+      gridCtx.textBaseline = 'middle';
+      for (let row = 0; row < grid.height; row += 1) {
+        for (let col = 0; col < grid.width; col += 1) {
+          const idx = row * grid.width + col;
+          const led = grid.map[idx];
+          const x = startX + col * cellSize;
+          const y = startY + row * cellSize;
+          gridCtx.strokeStyle = '#1f2430';
+          gridCtx.strokeRect(x, y, cellSize, cellSize);
+          if (led !== -1) {
+            gridCtx.fillStyle = '#2563eb';
+            gridCtx.fillRect(x + 1, y + 1, cellSize - 2, cellSize - 2);
+            gridCtx.fillStyle = '#f8fafc';
+            gridCtx.fillText(String(led), x + cellSize / 2, y + cellSize / 2);
+          }
+        }
+      }
+    }
+
+    function updateSummary(grid) {
+      if (!grid) { summaryEl.textContent = ''; return; }
+      summaryEl.textContent = `Grid ${grid.width}x${grid.height} | LEDs: ${grid.map.filter(v => v !== -1).length}`;
+    }
+
+    async function loadCsv() {
+      statusEl.textContent = 'Loading CSV...';
+      try {
+        const text = await fetchFirst(csvCandidates);
+        const raw = parseCsv(text);
+        sourcePoints = scaleSourcePoints(raw);
+        renderSource(sourcePoints);
+        statusEl.textContent = `CSV loaded (${raw.length} rows)`;
+      } catch (err) {
+        sourcePoints = [];
+        renderSource(sourcePoints);
+        statusEl.textContent = err.message || 'Failed to load CSV';
+      }
+    }
+
+    async function applyConversion() {
+      const payload = {
+        step: stepInput.value ? Number(stepInput.value) : undefined,
+        width: widthInput.value ? Number(widthInput.value) : undefined,
+        height: heightInput.value ? Number(heightInput.value) : undefined,
+        include_meta: false,
+      };
+      statusEl.textContent = 'Converting...';
+      try {
+        const res = await fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!res.ok) throw new Error('Convert failed');
+        const data = await res.json();
+        currentGrid = { map: data.map, width: data.width, height: data.height };
+        renderGrid(currentGrid);
+        updateSummary(currentGrid);
+        statusEl.textContent = `Ready (${currentGrid.width}x${currentGrid.height})`;
+      } catch (err) {
+        currentGrid = null;
+        renderGrid(null);
+        updateSummary(null);
+        statusEl.textContent = err.message || 'Conversion failed';
+      }
+    }
+
+    async function generateLedmap() {
+      await applyConversion();
+      if (currentGrid) {
+        downloadLedmap();
+      }
+    }
+
+    // Mapping controls
+    let pollTimer = null;
+    async function startMapping() {
+      const payload = {
+        host: hostInput.value || 'http://wled.local',
+        led_count: Number(countInput.value) || 1,
+        camera_index: Number(cameraInput.value) || 0,
+        frames_per_led: Number(framesInput.value) || 5,
+        min_brightness: Number(minBrightInput.value) || 30,
+        segment_index: Number(segmentInput.value) || 0,
+        transition_ms: Number(transitionInput.value) || 0,
+        prelight_delay: Number(prelightInput.value) || 0,
+        capture_delay: Number(captureInput.value) || 0,
+        postlight_delay: Number(postlightInput.value) || 0,
+      };
+      statusEl.textContent = 'Starting mapping...';
+      try {
+        const res = await fetch('/api/map', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!res.ok) throw new Error('Failed to start mapping');
+        // Poll status
+        if (pollTimer) { clearInterval(pollTimer); }
+        pollTimer = setInterval(async () => {
+          try {
+            const sres = await fetch('/api/status', { cache: 'no-store' });
+            if (!sres.ok) throw new Error('status failed');
+            const st = await sres.json();
+            const cur = st.current ?? 0;
+            const tot = st.total ?? 0;
+            statusEl.textContent = `${st.message || st.status} ${cur}/${tot}`;
+            if (st.status === 'completed' || st.status === 'error') {
+              clearInterval(pollTimer);
+              pollTimer = null;
+              if (st.status === 'completed') {
+                // Auto-reload CSV once done
+                await loadCsv();
+                statusEl.textContent = 'Capture finished; CSV loaded';
+              }
+            }
+          } catch (_) { /* ignore transient errors */ }
+        }, 800);
+      } catch (err) {
+        statusEl.textContent = err.message || 'Mapping start failed';
+      }
+    }
+
+    function downloadLedmap() {
+      if (!currentGrid) { statusEl.textContent = 'No grid to download'; return; }
+      const formatted = formatLedMapText(currentGrid.map, currentGrid.width, currentGrid.height);
+      const blob = new Blob([formatted], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'ledmap.json';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadGaps() {
+      if (!currentGrid) { statusEl.textContent = 'No grid to download'; return; }
+      const gap = currentGrid.map.map(v => (v === -1 ? -1 : 1));
+      const lines = ['['];
+      for (let row = 0; row < currentGrid.height; row += 1) {
+        const start = row * currentGrid.width;
+        const rowValues = gap.slice(start, start + currentGrid.width);
+        const suffix = row < currentGrid.height - 1 ? ',' : '';
+        lines.push('    ' + rowValues.map(v => v.toString().padStart(2, ' ')).join(', ') + suffix);
+      }
+      lines.push(']');
+      const blob = new Blob([lines.join('\n') + '\n'], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = '2d-gaps.json';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    document.getElementById('reloadBtn').addEventListener('click', loadCsv);
+    document.getElementById('startBtn').addEventListener('click', startMapping);
+    document.getElementById('applyBtn').addEventListener('click', applyConversion);
+    document.getElementById('generateBtn').addEventListener('click', generateLedmap);
+    document.getElementById('generateGapsBtn').addEventListener('click', () => { if (!currentGrid) applyConversion().then(downloadGaps); else downloadGaps(); });
+    if (wireToggle) wireToggle.addEventListener('change', () => renderSource(sourcePoints));
+
+    loadCsv();
+    renderGrid(null);
+  </script>
+</body>
+</html>
