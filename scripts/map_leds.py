@@ -6,17 +6,30 @@ server) can drive the capture pipeline, while still supporting CLI usage.
 """
 import argparse
 import csv
+import json
+import logging
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from threading import Event
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import requests
 
 
 ProgressHook = Callable[[int, str, Dict[str, float]], None]
+
+LOGGER = logging.getLogger("wled.mapper")
+if not LOGGER.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    LOGGER.addHandler(handler)
+LOGGER.setLevel(logging.INFO)
+LOGGER.propagate = False
 
 
 @dataclass
@@ -41,6 +54,7 @@ class MappingConfig:
 class MappingResult:
     entries: List[Dict[str, float]]
     output_path: Optional[Path] = None
+    stopped: bool = False
 
 
 class MappingError(RuntimeError):
@@ -124,85 +138,99 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_win_url(host: str) -> str:
-    return host.rstrip("/") + "/win"
+OFF_HEX = "000000"
+ON_HEX = "FFFFFF"
+LED_RETRY_ATTEMPTS = 5
 
 
-def build_query_url(win_url: str, params: Dict[str, int]) -> str:
-    query = "".join(f"&{key}={value}" for key, value in params.items())
-    return win_url + query
+def build_state_url(host: str) -> str:
+    return host.rstrip("/") + "/json/state"
 
 
-def reset_strip(
-    win_url: str,
+def _build_range_payload(led_count: int, active_led: Optional[int]) -> List[object]:
+    if active_led is None:
+        return [0, led_count, OFF_HEX]
+
+    ranges: List[object] = []
+    if active_led > 0:
+        ranges.extend([0, active_led, OFF_HEX])
+    ranges.extend([active_led, active_led + 1, ON_HEX])
+    if active_led + 1 < led_count:
+        ranges.extend([active_led + 1, led_count, OFF_HEX])
+    return ranges
+
+
+def _log_payload(label: str, payload: Dict[str, object]) -> None:
+    if LOGGER.isEnabledFor(logging.INFO):
+        LOGGER.info(
+            "WLED POST [%s]: %s", label, json.dumps(payload, ensure_ascii=False)
+        )
+
+
+def initialize_segment(
+    state_url: str,
     led_count: int,
+    timeout: float,
+    segment_index: int,
+    hook: Optional[ProgressHook],
+) -> None:
+    payload: Dict[str, object] = {
+        "on": True,
+        "seg": [
+            {
+                "id": segment_index,
+                "start": 0,
+                "stop": led_count,
+                "fx": 0,
+                "pal": 0,
+            }
+        ],
+    }
+    _log_payload("initialize_segment", payload)
+    response = requests.post(state_url, json=payload, timeout=timeout)
+    response.raise_for_status()
+    if hook:
+        hook(-1, "init", {"payload": payload})
+
+
+def send_active_led(
+    state_url: str,
+    led_count: int,
+    active_led: Optional[int],
     timeout: float,
     label: str,
     hook: Optional[ProgressHook],
-    led_index: int = -1,
-    segment_index: int = 0,
-    transition_ms: int = 0,
+    segment_index: int,
 ) -> None:
-    # Select segment, cover full range, set RGB=0 and brightness A=0 to ensure all LEDs are dark
-    params = {
-        "SS": segment_index,
-        "S": 0,
-        "S2": led_count,
-        "R": 0,
-        "G": 0,
-        "B": 0,
-        "A": 0,
-        "TT": max(0, int(transition_ms)),
+    ranges = _build_range_payload(led_count, active_led)
+    payload: Dict[str, object] = {
+        "seg": [
+            {
+                "id": segment_index,
+                "i": ranges,
+            }
+        ]
     }
-    url = build_query_url(win_url, params)
-    response = requests.get(url, timeout=timeout)
+    _log_payload(label, payload)
+    response = requests.post(state_url, json=payload, timeout=timeout)
     response.raise_for_status()
     if hook:
-        hook(led_index, label, {"url": url})
-
-
-def highlight_led(
-    win_url: str,
-    led_index: int,
-    timeout: float,
-    hook: Optional[ProgressHook],
-    segment_index: int = 0,
-    transition_ms: int = 0,
-) -> None:
-    # Ensure segment is selected and brightness is sufficient
-    params = {
-        "SS": segment_index,
-        "S": led_index,
-        "S2": led_index + 1,
-        "R": 255,
-        "G": 255,
-        "B": 255,
-        "A": 255,
-        "TT": max(0, int(transition_ms)),
-    }
-    url = build_query_url(win_url, params)
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    if hook:
-        hook(led_index, "highlight", {"url": url})
+        hook(-1 if active_led is None else active_led, label, {"range_entries": len(ranges)})
 
 
 def collect_brightest_points(
-    cap: cv2.VideoCapture, frames: int
-) -> List[Tuple[float, Tuple[int, int]]]:
+    cap: cv2.VideoCapture, camera_index: int, frames: int
+) -> Tuple[cv2.VideoCapture, List[Tuple[float, Tuple[int, int]]]]:
     readings: List[Tuple[float, Tuple[int, int]]] = []
+    current_cap = cap
     for _ in range(frames):
-        if not cap.isOpened():
-            raise MappingError("Camera stream is not opened.")
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            raise MappingError("Failed to grab frame from camera.")
+        current_cap, frame = _read_frame(current_cap, camera_index)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (9, 9), 0)
         _, max_val, _, max_loc = cv2.minMaxLoc(blurred)
         readings.append((max_val, max_loc))
         time.sleep(0.05)
-    return readings
+    return current_cap, readings
 
 
 def compute_coordinate(
@@ -223,92 +251,153 @@ def compute_coordinate(
     return avg_x, avg_y, peak_val
 
 
-def _open_camera(camera_index: int) -> cv2.VideoCapture:
+def _open_camera(camera_index: int, attempts: int = 3, delay: float = 0.2) -> cv2.VideoCapture:
+    backends: List[int] = []
     if sys.platform.startswith("win"):
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY]
     else:
-        cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise MappingError(
+        backends = [cv2.CAP_ANY]
+
+    last_exc: Optional[MappingError] = None
+
+    for _ in range(max(1, attempts)):
+        for backend in backends:
+            try:
+                cap = cv2.VideoCapture(camera_index, backend)
+            except Exception:  # pylint: disable=broad-except
+                continue
+            if cap is not None and cap.isOpened():
+                return cap
+            cap.release()
+        last_exc = MappingError(
             "Unable to open camera. Check --camera-index and permissions."
         )
-    return cap
+        time.sleep(delay)
+
+    if last_exc:
+        raise last_exc
+    raise MappingError("Unable to open camera. Check --camera-index and permissions.")
+
+
+
+def _read_frame(cap: cv2.VideoCapture, camera_index: int) -> Tuple[cv2.VideoCapture, Any]:
+    if cap.isOpened():
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            return cap, frame
+    cap.release()
+    cap = _open_camera(camera_index)
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        raise MappingError("Failed to grab frame from camera.")
+    return cap, frame
+
 
 
 def run_mapping(
-    config: MappingConfig, hook: Optional[ProgressHook] = None
+    config: MappingConfig,
+    hook: Optional[ProgressHook] = None,
+    stop_event: Optional[Event] = None,
 ) -> MappingResult:
-    win_url = build_win_url(config.host)
+    state_url = build_state_url(config.host)
     cap = _open_camera(config.camera_index)
     results: List[Dict[str, float]] = []
+    stopped = False
     try:
-        # Ensure strip is dark before starting
-        reset_strip(
-            win_url,
+        initialize_segment(
+            state_url,
             config.led_count,
             config.timeout,
-            "initial-reset",
+            config.segment_index,
+            hook,
+        )
+        send_active_led(
+            state_url,
+            config.led_count,
+            None,
+            config.timeout,
+            "initial-strip",
             hook,
             segment_index=config.segment_index,
-            transition_ms=config.transition_ms,
         )
         if config.prelight_delay > 0:
             time.sleep(config.prelight_delay)
         for led in range(config.led_count):
-            # Always turn everything off first, then light one LED
-            reset_strip(
-                win_url,
-                config.led_count,
-                config.timeout,
-                "pre-highlight-reset",
-                hook,
-                led,
-                segment_index=config.segment_index,
-                transition_ms=config.transition_ms,
-            )
-            if config.prelight_delay > 0:
-                time.sleep(config.prelight_delay)
-            highlight_led(
-                win_url,
-                led,
-                config.timeout,
-                hook,
-                segment_index=config.segment_index,
-                transition_ms=config.transition_ms,
-            )
-            time.sleep(config.capture_delay)
-            readings = collect_brightest_points(cap, config.frames_per_led)
-            x, y, peak = compute_coordinate(
-                readings, config.top_frame_ratio, config.min_brightness
-            )
-            results.append(
-                {
-                    "led": led,
-                    "x": round(x, 2),
-                    "y": round(y, 2),
-                    "brightness": round(peak, 2),
-                }
-            )
+            if stop_event and stop_event.is_set():
+                stopped = True
+                break
+            attempt = 0
+            while True:
+                attempt += 1
+                send_active_led(
+                    state_url,
+                    config.led_count,
+                    led,
+                    config.timeout,
+                    "highlight",
+                    hook,
+                    segment_index=config.segment_index,
+                )
+                time.sleep(config.capture_delay)
+                try:
+                    cap, readings = collect_brightest_points(
+                        cap, config.camera_index, config.frames_per_led
+                    )
+                    x, y, peak = compute_coordinate(
+                        readings, config.top_frame_ratio, config.min_brightness
+                    )
+                    point = {
+                        "led": led,
+                        "x": round(x, 2),
+                        "y": round(y, 2),
+                        "brightness": round(peak, 2),
+                    }
+                    results.append(point)
+                    if hook:
+                        hook(led, "captured", point)
+                    break
+                except MappingError as exc:
+                    LOGGER.warning(
+                        "LED %s capture failed (attempt %s/%s): %s",
+                        led,
+                        attempt,
+                        LED_RETRY_ATTEMPTS,
+                        exc,
+                    )
+                    if hook:
+                        hook(
+                            led,
+                            "retry",
+                            {"attempt": attempt, "max": LED_RETRY_ATTEMPTS, "reason": str(exc)},
+                        )
+                    if attempt >= LED_RETRY_ATTEMPTS:
+                        raise
+                    time.sleep(max(config.prelight_delay, 0.05))
+                    continue
+            if stop_event and stop_event.is_set():
+                stopped = True
+                break
             if config.postlight_delay > 0:
                 time.sleep(config.postlight_delay)
-            # Turn everything off again after capture
-            reset_strip(
-                win_url,
-                config.led_count,
-                config.timeout,
-                "per-led-reset",
-                hook,
-                led,
-                segment_index=config.segment_index,
-                transition_ms=config.transition_ms,
-            )
             if config.prelight_delay > 0 and led != config.led_count - 1:
                 time.sleep(config.prelight_delay)
             if config.sleep_every and (led + 1) % config.sleep_every == 0:
                 time.sleep(config.cooldown)
     finally:
         cap.release()
-    return MappingResult(entries=results)
+        try:
+            send_active_led(
+                state_url,
+                config.led_count,
+                None,
+                config.timeout,
+                "final-reset",
+                hook,
+                segment_index=config.segment_index,
+            )
+        except requests.RequestException:
+            pass
+    return MappingResult(entries=results, stopped=stopped)
 
 
 def write_csv(entries: Iterable[Dict[str, float]], path: Path) -> None:
@@ -320,6 +409,11 @@ def write_csv(entries: Iterable[Dict[str, float]], path: Path) -> None:
 
 
 def main() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
     args = parse_args()
     config = MappingConfig(
         host=args.host,

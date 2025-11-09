@@ -11,12 +11,20 @@
     button, .field { background: #1f2430; color: #f1f1f1; border: 1px solid #2d3240; padding: 6px 12px; cursor: pointer; font-size: 0.9rem; }
     button:hover { background: #2b3242; }
     .field { display: flex; align-items: center; gap: 8px; cursor: default; }
-    .field input[type=number] { width: 90px; background: #0f1115; border: 1px solid #2d3240; color: #f1f1f1; padding: 4px 6px; }
+    .field input[type=number], .field select, .field input[type=range] { width: 110px; background: #0f1115; border: 1px solid #2d3240; color: #f1f1f1; padding: 4px 6px; }
+    .field select { appearance: none; -moz-appearance: none; -webkit-appearance: none; }
+    .step-control { display: flex; align-items: center; gap: 8px; }
+    .step-control input[type=range] { width: 160px; padding: 0; }
+    .step-control input[type=number] { width: 70px; }
+    .hidden { display: none !important; }
     #panels { display: flex; flex: 1; gap: 16px; padding: 16px; box-sizing: border-box; }
     .panel { flex: 1; background: #11141d; border: 1px solid #1f2430; padding: 12px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; }
     .panel-head { display: flex; align-items: center; gap: 12px; }
     .panel h2 { margin: 0; font-size: 1rem; color: #dbe3ff; }
     .canvas-wrap { flex: 1; position: relative; background: #08090d; border: 1px solid #232938; display: flex; justify-content: center; align-items: center; }
+    .camera-preview-wrap { flex: 1; position: relative; background: #08090d; border: 1px solid #232938; display: flex; justify-content: center; align-items: center; min-height: 220px; }
+    #cameraPreview { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+    #previewStatus { font-size: 0.85rem; color: #b5bcc9; }
     canvas { width: 100%; height: 100%; }
     #status { font-size: 0.9rem; color: #b5bcc9; }
     #summary { font-size: 0.9rem; color: #ced6f3; }
@@ -37,7 +45,13 @@
       <div class="control-row">
         <label class="field">Host <input id="hostInput" type="text" placeholder="http://wled.local" style="width:200px"></label>
         <label class="field">LEDs <input id="countInput" type="number" min="1" step="1" value="150"></label>
-        <label class="field">Camera <input id="cameraInput" type="number" min="0" step="1" value="0"></label>
+        <label class="field">Camera
+          <select id="cameraSelect">
+            <option value="" disabled selected>Scanning...</option>
+          </select>
+          <input id="cameraManualInput" type="number" min="0" step="1" value="0" class="hidden" title="Enter camera index manually when scanning is unavailable">
+        </label>
+        <button id="cameraScanBtn" type="button">Scan Cameras</button>
         <label class="field">Segment <input id="segmentInput" type="number" min="0" step="1" value="0"></label>
         <label class="field">Frames/LED <input id="framesInput" type="number" min="1" step="1" value="5"></label>
         <label class="field">Transition (ms) <input id="transitionInput" type="number" min="0" max="65000" step="50" value="0"></label>
@@ -46,14 +60,20 @@
         <label class="field">Capture (s) <input id="captureInput" type="number" min="0" step="0.05" value="0.6"></label>
         <label class="field">Postlight (s) <input id="postlightInput" type="number" min="0" step="0.05" value="0.2"></label>
         <button id="startBtn">Start Mapping</button>
+        <button id="stopBtn" disabled>Stop Mapping</button>
         <button id="reloadBtn">Reload CSV</button>
         <span id="status"></span>
       </div>
       <div class="control-row">
-        <label class="field">Step <input id="stepInput" type="number" min="0.05" step="0.05" value="10"></label>
+        <label class="field step-field">Step
+          <div class="step-control">
+            <input id="stepSlider" type="range" min="1" max="80" step="1" value="10">
+            <input id="stepNumber" type="number" min="1" max="80" step="1" value="10">
+            <span id="stepValue">10</span>
+          </div>
+        </label>
         <label class="field">Width <input id="widthInput" type="number" min="1" step="1" placeholder="auto"></label>
         <label class="field">Height <input id="heightInput" type="number" min="1" step="1" placeholder="auto"></label>
-        <button id="applyBtn">Apply</button>
         <button id="generateBtn">Generate ledmap.json</button>
         <button id="generateGapsBtn">Download 2D gaps</button>
       </div>
@@ -62,6 +82,16 @@
       </div>
     </div>
     <div id="panels">
+      <div class="panel preview-panel">
+        <div class="panel-head">
+          <h2>Camera Preview</h2>
+          <button id="previewRefreshBtn" type="button">Refresh Preview</button>
+          <span id="previewStatus"></span>
+        </div>
+        <div class="camera-preview-wrap">
+          <img id="cameraPreview" alt="Camera preview" />
+        </div>
+      </div>
       <div class="panel">
         <div class="panel-head">
           <h2>Camera Space</h2>
@@ -90,7 +120,9 @@
     const summaryEl = document.getElementById('summary');
     const hostInput = document.getElementById('hostInput');
     const countInput = document.getElementById('countInput');
-    const cameraInput = document.getElementById('cameraInput');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const cameraManualInput = document.getElementById('cameraManualInput');
+    const cameraScanBtn = document.getElementById('cameraScanBtn');
     const framesInput = document.getElementById('framesInput');
     const segmentInput = document.getElementById('segmentInput');
     const prelightInput = document.getElementById('prelightInput');
@@ -98,12 +130,28 @@
     const postlightInput = document.getElementById('postlightInput');
     const transitionInput = document.getElementById('transitionInput');
     const minBrightInput = document.getElementById('minBrightInput');
-    const stepInput = document.getElementById('stepInput');
+    const stepSlider = document.getElementById('stepSlider');
+    const stepNumber = document.getElementById('stepNumber');
+    const stepValue = document.getElementById('stepValue');
     const widthInput = document.getElementById('widthInput');
     const heightInput = document.getElementById('heightInput');
+    const previewImage = document.getElementById('cameraPreview');
+    const previewStatus = document.getElementById('previewStatus');
+    const previewRefreshBtn = document.getElementById('previewRefreshBtn');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
 
     let sourcePoints = [];
     let currentGrid = null;
+    let liveRawPoints = [];
+    let liveModeActive = false;
+    let livePointsCursor = -1;
+    let liveFetchPending = false;
+    const PREVIEW_REFRESH_INTERVAL = 1000;
+    let previewLoopTimer = null;
+    let previewLoading = false;
+    let previewPaused = false;
+    let conversionTimer = null;
 
     function formatLedMapText(map, width, height) {
       const lines = ['{"map":', '  ['];
@@ -141,6 +189,174 @@
         headers.forEach((k, i) => { rec[k] = Number(parts[i]); });
         return rec;
       });
+    }
+
+    function getSelectedCameraIndex() {
+      if (cameraSelect && !cameraSelect.classList.contains('hidden') && cameraSelect.value !== '') {
+        return Number(cameraSelect.value);
+      }
+      if (cameraManualInput && !cameraManualInput.classList.contains('hidden')) {
+        return Number(cameraManualInput.value || 0);
+      }
+      return 0;
+    }
+
+    async function refreshCameraList() {
+      if (!cameraSelect) { return; }
+      const previousValue = cameraSelect.value;
+      cameraSelect.disabled = true;
+      cameraSelect.innerHTML = '<option value="" disabled>Scanning...</option>';
+      previewStatus.textContent = 'Scanning cameras...';
+      cameraSelect.classList.remove('hidden');
+      if (cameraManualInput) { cameraManualInput.classList.add('hidden'); }
+      try {
+        const res = await fetch('/api/cameras?max_index=12', { cache: 'no-store' });
+        if (!res.ok) { throw new Error('Camera scan failed'); }
+        const data = await res.json();
+        const cameras = Array.isArray(data.cameras) ? data.cameras : [];
+        cameraSelect.innerHTML = '';
+        if (!cameras.length) {
+          const option = document.createElement('option');
+          option.value = '';
+          option.textContent = 'No cameras found';
+          cameraSelect.appendChild(option);
+          cameraSelect.value = '';
+          cameraSelect.disabled = true;
+          previewStatus.textContent = 'No cameras detected – enter an index manually';
+          if (previewImage) { previewImage.removeAttribute('src'); }
+          if (cameraManualInput) { cameraManualInput.classList.remove('hidden'); }
+          return;
+        }
+        const frag = document.createDocumentFragment();
+        cameras.forEach(cam => {
+          const option = document.createElement('option');
+          option.value = String(cam.index);
+          option.textContent = `Camera ${cam.index}`;
+          frag.appendChild(option);
+        });
+        cameraSelect.appendChild(frag);
+        const retained = cameras.find(cam => String(cam.index) === previousValue);
+        cameraSelect.value = retained ? String(retained.index) : String(cameras[0].index);
+        cameraSelect.disabled = false;
+        previewStatus.textContent = '';
+        if (cameraManualInput) {
+          cameraManualInput.classList.add('hidden');
+          cameraManualInput.value = cameraSelect.value || '0';
+        }
+        await refreshPreview();
+      } catch (err) {
+        cameraSelect.innerHTML = '';
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'Scan failed';
+        cameraSelect.appendChild(option);
+        cameraSelect.value = '';
+        cameraSelect.disabled = true;
+        previewStatus.textContent = err && err.message ? err.message : 'Camera scan failed';
+        if (previewImage) { previewImage.removeAttribute('src'); }
+        if (cameraManualInput) { cameraManualInput.classList.remove('hidden'); }
+        cameraSelect.classList.add('hidden');
+      } finally {
+        startPreviewLoop();
+      }
+    }
+
+    async function refreshPreview(force = false) {
+      if (!previewImage) { return; }
+      const selectVisible = cameraSelect && !cameraSelect.classList.contains('hidden');
+      if (selectVisible && cameraSelect.value === '') {
+        previewStatus.textContent = 'Select a camera to preview';
+        previewImage.removeAttribute('src');
+        return;
+      }
+      const manualVisible = cameraManualInput && !cameraManualInput.classList.contains('hidden');
+      if (manualVisible && (!cameraManualInput.value && cameraManualInput.value !== '0')) {
+        previewStatus.textContent = 'Enter a camera index';
+        previewImage.removeAttribute('src');
+        return;
+      }
+      const index = getSelectedCameraIndex();
+      if (Number.isNaN(index)) { return; }
+      if (previewLoading && !force) { return; }
+      previewLoading = true;
+      previewStatus.textContent = 'Loading preview...';
+      const cacheBust = Date.now();
+      const url = `/api/camera_preview/${index}?width=640&_=${cacheBust}`;
+      return new Promise(resolve => {
+        const finish = (message) => {
+          previewLoading = false;
+          if (message !== undefined) {
+            previewStatus.textContent = message;
+          }
+          resolve();
+        };
+        previewImage.onload = () => {
+          finish('');
+        };
+        previewImage.onerror = () => {
+          finish('Preview failed');
+        };
+        previewImage.src = url;
+      });
+    }
+
+    function startPreviewLoop() {
+      if (previewLoopTimer || previewPaused) { return; }
+      previewLoopTimer = setInterval(() => { refreshPreview(); }, PREVIEW_REFRESH_INTERVAL);
+      refreshPreview();
+    }
+
+    function stopPreviewLoop() {
+      if (!previewLoopTimer) { return; }
+      clearInterval(previewLoopTimer);
+      previewLoopTimer = null;
+    }
+
+    function pausePreview(message) {
+      previewPaused = true;
+      stopPreviewLoop();
+      if (previewImage) { previewImage.removeAttribute('src'); }
+      previewStatus.textContent = message || 'Camera in use during mapping';
+    }
+
+    function resumePreview() {
+      previewPaused = false;
+      startPreviewLoop();
+    }
+
+    function getStepValue() {
+      return stepSlider ? Number(stepSlider.value) : undefined;
+    }
+
+    function scheduleConversion(delay = 400) {
+      if (conversionTimer) { clearTimeout(conversionTimer); }
+      conversionTimer = setTimeout(() => {
+        conversionTimer = null;
+        applyConversion(true);
+      }, delay);
+    }
+
+    async function fetchLivePoints() {
+      if (!liveModeActive || liveFetchPending) { return; }
+      liveFetchPending = true;
+      try {
+        const url = `/api/live_points?after=${livePointsCursor}`;
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) { throw new Error('Live points unavailable'); }
+        const data = await res.json();
+        const points = Array.isArray(data.points) ? data.points : [];
+        if (!points.length) { return; }
+        points.sort((a, b) => (a.led ?? 0) - (b.led ?? 0));
+        liveRawPoints = liveRawPoints.concat(points);
+        livePointsCursor = liveRawPoints[liveRawPoints.length - 1].led ?? livePointsCursor;
+        sourcePoints = scaleSourcePoints(liveRawPoints);
+        renderSource(sourcePoints);
+        scheduleConversion(500);
+      } catch (err) {
+        console.warn('Live point fetch failed', err);
+      } finally {
+        liveFetchPending = false;
+      }
     }
 
     function scaleSourcePoints(data) {
@@ -248,6 +464,9 @@
     }
 
     async function loadCsv() {
+      liveModeActive = false;
+      liveRawPoints = [];
+      livePointsCursor = -1;
       statusEl.textContent = 'Loading CSV...';
       try {
         const text = await fetchFirst(csvCandidates);
@@ -255,6 +474,7 @@
         sourcePoints = scaleSourcePoints(raw);
         renderSource(sourcePoints);
         statusEl.textContent = `CSV loaded (${raw.length} rows)`;
+        await applyConversion();
       } catch (err) {
         sourcePoints = [];
         renderSource(sourcePoints);
@@ -262,14 +482,14 @@
       }
     }
 
-    async function applyConversion() {
+    async function applyConversion(silent = false) {
       const payload = {
-        step: stepInput.value ? Number(stepInput.value) : undefined,
+        step: getStepValue(),
         width: widthInput.value ? Number(widthInput.value) : undefined,
         height: heightInput.value ? Number(heightInput.value) : undefined,
         include_meta: false,
       };
-      statusEl.textContent = 'Converting...';
+      if (!silent) { statusEl.textContent = 'Converting...'; }
       try {
         const res = await fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         if (!res.ok) throw new Error('Convert failed');
@@ -277,12 +497,16 @@
         currentGrid = { map: data.map, width: data.width, height: data.height };
         renderGrid(currentGrid);
         updateSummary(currentGrid);
-        statusEl.textContent = `Ready (${currentGrid.width}x${currentGrid.height})`;
+        if (!silent) { statusEl.textContent = `Ready (${currentGrid.width}x${currentGrid.height})`; }
       } catch (err) {
-        currentGrid = null;
-        renderGrid(null);
-        updateSummary(null);
-        statusEl.textContent = err.message || 'Conversion failed';
+        if (!silent) {
+          currentGrid = null;
+          renderGrid(null);
+          updateSummary(null);
+          statusEl.textContent = err.message || 'Conversion failed';
+        } else {
+          console.debug('Conversion skipped', err);
+        }
       }
     }
 
@@ -295,11 +519,20 @@
 
     // Mapping controls
     let pollTimer = null;
+    function setMappingRunning(running) {
+      if (startBtn) { startBtn.disabled = running; }
+      if (stopBtn) { stopBtn.disabled = !running; }
+    }
+
     async function startMapping() {
+      liveRawPoints = [];
+      livePointsCursor = -1;
+      liveModeActive = true;
+      renderSource([]);
       const payload = {
         host: hostInput.value || 'http://wled.local',
         led_count: Number(countInput.value) || 1,
-        camera_index: Number(cameraInput.value) || 0,
+        camera_index: getSelectedCameraIndex(),
         frames_per_led: Number(framesInput.value) || 5,
         min_brightness: Number(minBrightInput.value) || 30,
         segment_index: Number(segmentInput.value) || 0,
@@ -310,8 +543,11 @@
       };
       statusEl.textContent = 'Starting mapping...';
       try {
+        setMappingRunning(true);
         const res = await fetch('/api/map', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         if (!res.ok) throw new Error('Failed to start mapping');
+        pausePreview('Camera in use during mapping');
+        fetchLivePoints().catch(() => {});
         // Poll status
         if (pollTimer) { clearInterval(pollTimer); }
         pollTimer = setInterval(async () => {
@@ -322,19 +558,48 @@
             const cur = st.current ?? 0;
             const tot = st.total ?? 0;
             statusEl.textContent = `${st.message || st.status} ${cur}/${tot}`;
-            if (st.status === 'completed' || st.status === 'error') {
+            const capturing = st.status === 'running' || st.status === 'starting';
+            liveModeActive = capturing;
+            if (capturing) {
+              pausePreview('Camera in use during mapping');
+              await fetchLivePoints();
+            }
+            if (st.status === 'completed' || st.status === 'error' || st.status === 'stopped') {
               clearInterval(pollTimer);
               pollTimer = null;
+              liveModeActive = false;
+              resumePreview();
+              setMappingRunning(false);
               if (st.status === 'completed') {
                 // Auto-reload CSV once done
                 await loadCsv();
                 statusEl.textContent = 'Capture finished; CSV loaded';
+              } else if (st.status === 'stopped') {
+                await loadCsv();
+                statusEl.textContent = 'Capture stopped';
               }
             }
           } catch (_) { /* ignore transient errors */ }
         }, 800);
       } catch (err) {
         statusEl.textContent = err.message || 'Mapping start failed';
+        liveModeActive = false;
+        liveRawPoints = [];
+        livePointsCursor = -1;
+        resumePreview();
+        setMappingRunning(false);
+      }
+    }
+
+    async function stopMapping() {
+      if (stopBtn) { stopBtn.disabled = true; }
+      statusEl.textContent = 'Stopping mapping...';
+      try {
+        const res = await fetch('/api/stop', { method: 'POST' });
+        if (!res.ok) throw new Error('Stop request failed');
+      } catch (err) {
+        statusEl.textContent = err.message || 'Stop failed';
+        if (stopBtn) { stopBtn.disabled = false; }
       }
     }
 
@@ -376,11 +641,58 @@
 
     document.getElementById('reloadBtn').addEventListener('click', loadCsv);
     document.getElementById('startBtn').addEventListener('click', startMapping);
-    document.getElementById('applyBtn').addEventListener('click', applyConversion);
     document.getElementById('generateBtn').addEventListener('click', generateLedmap);
-    document.getElementById('generateGapsBtn').addEventListener('click', () => { if (!currentGrid) applyConversion().then(downloadGaps); else downloadGaps(); });
-    if (wireToggle) wireToggle.addEventListener('change', () => renderSource(sourcePoints));
+    document.getElementById('generateGapsBtn').addEventListener('click', async () => {
+      if (!currentGrid) {
+        await applyConversion();
+        if (!currentGrid) { return; }
+      }
+      downloadGaps();
+    });
+    if (wireToggle) { wireToggle.addEventListener('change', () => renderSource(sourcePoints)); }
+    if (cameraScanBtn) { cameraScanBtn.addEventListener('click', () => { refreshCameraList(); }); }
+    if (cameraSelect) { cameraSelect.addEventListener('change', () => { refreshPreview(true); startPreviewLoop(); }); }
+    if (cameraManualInput) { cameraManualInput.addEventListener('change', () => { refreshPreview(true); startPreviewLoop(); }); }
+    if (previewRefreshBtn) { previewRefreshBtn.addEventListener('click', () => { refreshPreview(true); }); }
+    if (stopBtn) { stopBtn.addEventListener('click', stopMapping); }
+    if (stepSlider && stepNumber && stepValue) {
+      const syncFromSlider = () => {
+        stepNumber.value = stepSlider.value;
+        stepValue.textContent = stepSlider.value;
+      };
+      const syncFromNumber = () => {
+        const clamped = Math.min(Math.max(Number(stepNumber.value) || 1, 1), 80);
+        stepNumber.value = clamped;
+        stepSlider.value = clamped;
+        stepValue.textContent = clamped;
+      };
+      syncFromSlider();
+      stepSlider.addEventListener('input', () => {
+        syncFromSlider();
+        scheduleConversion(200);
+      });
+      stepNumber.addEventListener('input', () => {
+        syncFromNumber();
+        scheduleConversion(200);
+      });
+    }
+    if (widthInput) { widthInput.addEventListener('input', () => { scheduleConversion(400); }); }
+    if (heightInput) { heightInput.addEventListener('input', () => { scheduleConversion(400); }); }
+    if (stepSlider && stepValue) {
+      stepValue.textContent = stepSlider.value;
+      stepSlider.addEventListener('input', () => {
+        stepValue.textContent = stepSlider.value;
+        scheduleConversion(200);
+      });
+    }
+    if (widthInput) { widthInput.addEventListener('input', () => { scheduleConversion(400); }); }
+    if (heightInput) { heightInput.addEventListener('input', () => { scheduleConversion(400); }); }
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { stopPreviewLoop(); }
+      else { startPreviewLoop(); }
+    });
 
+    refreshCameraList();
     loadCsv();
     renderGrid(null);
   </script>
