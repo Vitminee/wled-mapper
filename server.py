@@ -79,6 +79,7 @@ class MapRequest(BaseModel):
     top_frame_ratio: float = 0.4
 
     min_brightness: float = 30.0
+    skip_dim_leds: bool = False
 
     timeout: float = 3.0
 
@@ -220,6 +221,20 @@ def _progress_hook(led_index: int, stage: str, payload):
             )
 
             _append_mapping_entry(point)
+
+        return
+
+    if stage == "skipped":
+
+        message = "skipped"
+        if payload and payload.get("reason"):
+            message = payload["reason"]
+
+        _update_state(
+            status="running",
+            message=message,
+            current=max(0, led_index + 1),
+        )
 
         return
 

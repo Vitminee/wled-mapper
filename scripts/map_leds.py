@@ -45,6 +45,7 @@ class MappingConfig:
     frames_per_led: int = 5
     top_frame_ratio: float = 0.4
     min_brightness: float = 30.0
+    skip_dim_leds: bool = False
     timeout: float = 3.0
     sleep_every: int = 25
     cooldown: float = 2.0
@@ -59,6 +60,10 @@ class MappingResult:
 
 class MappingError(RuntimeError):
     """Raised when the mapping pipeline fails."""
+
+
+class DimBrightnessError(MappingError):
+    """Raised when the brightest pixel does not exceed the minimum threshold."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,6 +121,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=30.0,
         help="Minimum grayscale value required to accept a blob (default: 30.0)",
+    )
+    parser.add_argument(
+        "--skip-dim-leds",
+        action="store_true",
+        help="Skip LEDs that never exceed --min-brightness instead of failing the run",
     )
     parser.add_argument(
         "--timeout",
@@ -245,7 +255,7 @@ def compute_coordinate(
     avg_y = sum(loc[1] for _, loc in top) / take
     peak_val = top[0][0]
     if peak_val < min_brightness:
-        raise MappingError(
+        raise DimBrightnessError(
             f"Brightness {peak_val:.2f} below threshold {min_brightness}."
         )
     return avg_x, avg_y, peak_val
@@ -356,6 +366,33 @@ def run_mapping(
                     if hook:
                         hook(led, "captured", point)
                     break
+                except DimBrightnessError as exc:
+                    LOGGER.warning(
+                        "LED %s capture failed (attempt %s/%s): %s",
+                        led,
+                        attempt,
+                        LED_RETRY_ATTEMPTS,
+                        exc,
+                    )
+                    if config.skip_dim_leds:
+                        LOGGER.info("Skipping LED %s due to low brightness", led)
+                        if hook:
+                            hook(
+                                led,
+                                "skipped",
+                                {"attempt": attempt, "reason": str(exc)},
+                            )
+                        break
+                    if hook:
+                        hook(
+                            led,
+                            "retry",
+                            {"attempt": attempt, "max": LED_RETRY_ATTEMPTS, "reason": str(exc)},
+                        )
+                    if attempt >= LED_RETRY_ATTEMPTS:
+                        raise
+                    time.sleep(max(config.prelight_delay, 0.05))
+                    continue
                 except MappingError as exc:
                     LOGGER.warning(
                         "LED %s capture failed (attempt %s/%s): %s",
@@ -425,6 +462,7 @@ def main() -> None:
         frames_per_led=args.frames_per_led,
         top_frame_ratio=args.top_frame_ratio,
         min_brightness=args.min_brightness,
+        skip_dim_leds=args.skip_dim_leds,
         timeout=args.timeout,
         sleep_every=args.sleep_every,
         cooldown=args.cooldown,

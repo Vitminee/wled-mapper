@@ -23,7 +23,7 @@ pip install -r requirements.txt
 python server.py
 ```
 Open `http://localhost:8000/` in your browser. The UI provides:
-- Mapping controls (WLED host, LED count, segment, camera index, frames, brightness)
+- Mapping controls (WLED host, LED count, segment, camera index, frames, brightness, skip-dim toggle)
 - Timing controls (prelight/capture/postlight delays) and WLED transition (`TT` in ms)
 - Live progress display while mapping runs
 - Grid preview & camera scatter plot
@@ -44,7 +44,7 @@ Open `http://localhost:8000/` in your browser. The UI provides:
    - LEDs (your strip length)
    - Segment (usually 0)
    - Camera (index for your system)
-   - Frames/LED + Min Bright (detection tuning)
+   - Frames/LED + Min Bright (detection tuning); enable **Skip dim LEDs** to move past LEDs that never cross the threshold
    - Prelight/Capture/Postlight delays (stability tuning)
    - Transition (ms) — WLED `TT`, set 0 for instant changes
 3. Click **Start Mapping**. The backend will:
@@ -67,6 +67,8 @@ You can run the mapping script directly:
 ```bash
 python scripts/map_leds.py http://wled.local 150 --camera-index 1 --output data/mapping.csv
 ```
+Add `--skip-dim-leds` to continue past LEDs that stay under the minimum brightness threshold.
+
 and convert to JSON:
 ```bash
 python scripts/convert_mapping.py --step 15 --include-meta
